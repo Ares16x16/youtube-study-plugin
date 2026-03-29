@@ -1,0 +1,28 @@
+node_modules/
+.output/
+.wxt/
+dist/
+coverage/
+docs/
+
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Build caches
+*.tsbuildinfo
+
+# OS files
+.DS_Store
+Thumbs.db

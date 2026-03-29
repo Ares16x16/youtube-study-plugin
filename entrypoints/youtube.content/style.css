@@ -1,0 +1,29 @@
+html[data-study-mode-session='active'][data-study-mode-route='watch'] #secondary-inner {
+  display: none !important;
+}
+
+html[data-study-mode-session='active'][data-study-mode-route='watch'] ytd-comments,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] #comments,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] ytd-live-chat-frame,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] #chat,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] ytd-reel-shelf-renderer,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] .ytp-ce-element,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] .ytp-endscreen-content,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] .ytp-pause-overlay-container,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] .ytp-cards-teaser,
+html[data-study-mode-session='active'][data-study-mode-route='watch'] ytd-merch-shelf-renderer {
+  display: none !important;
+}
+
+html[data-study-mode-session='active'][data-study-mode-route='results'] ytd-reel-shelf-renderer,
+html[data-study-mode-session='active'][data-study-mode-route='results'] ytd-shelf-renderer,
+html[data-study-mode-session='active'][data-study-mode-route='results'] ytd-rich-section-renderer,
+html[data-study-mode-session='active'][data-study-mode-route='results'] ytd-promoted-sparkles-web-renderer {
+  display: none !important;
+}
+
+#yt-study-mode-panel-host {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+}

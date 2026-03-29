@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "types": ["chrome", "node"]
+  },
+  "include": ["env.d.ts", "entrypoints/**/*.ts", "entrypoints/**/*.tsx", "src/**/*.ts", "src/**/*.tsx"]
+}
