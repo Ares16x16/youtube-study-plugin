@@ -3,11 +3,13 @@ import {
   LOCAL_ACTIVE_SESSION_KEY,
   LOCAL_NOTES_KEY,
   LOCAL_SESSION_HISTORY_KEY,
+  MAX_CUSTOM_MINUTES,
+  MIN_CUSTOM_MINUTES,
   SESSION_SCOPE,
   SYNC_SETTINGS_KEY,
 } from './constants';
 import { storageGet, storageRemove, storageSet } from './chrome';
-import type { ActiveSession, NoteItem, SessionHistoryVideo, StudySessionHistory, StudySettings, VideoNote } from './types';
+import type { ActiveSession, NoteItem, SessionHistoryVideo, StudySessionHistory, StudySettings, ThemePreference, VideoNote } from './types';
 
 export interface StorageDriver {
   sync: chrome.storage.StorageArea;
@@ -35,8 +37,21 @@ export function coerceStudySettings(input: unknown): StudySettings {
   return {
     ...DEFAULT_SETTINGS,
     ...candidate,
-    defaultSessionMinutes: normalizePositiveNumber(candidate.defaultSessionMinutes, DEFAULT_SETTINGS.defaultSessionMinutes),
+    defaultSessionMinutes: clampMinutes(
+      normalizePositiveNumber(candidate.defaultSessionMinutes, DEFAULT_SETTINGS.defaultSessionMinutes),
+    ),
     presets: normalizePresetList(candidate.presets),
+    themePreference: coerceThemePreference(candidate.themePreference),
+    blockHome: coerceBoolean(candidate.blockHome, DEFAULT_SETTINGS.blockHome),
+    blockShorts: coerceBoolean(candidate.blockShorts, DEFAULT_SETTINGS.blockShorts),
+    blockSubscriptions: coerceBoolean(candidate.blockSubscriptions, DEFAULT_SETTINGS.blockSubscriptions),
+    blockChannels: coerceBoolean(candidate.blockChannels, DEFAULT_SETTINGS.blockChannels),
+    blockPlaylists: coerceBoolean(candidate.blockPlaylists, DEFAULT_SETTINGS.blockPlaylists),
+    hideComments: coerceBoolean(candidate.hideComments, DEFAULT_SETTINGS.hideComments),
+    hideLiveChat: coerceBoolean(candidate.hideLiveChat, DEFAULT_SETTINGS.hideLiveChat),
+    hideRecommendations: coerceBoolean(candidate.hideRecommendations, DEFAULT_SETTINGS.hideRecommendations),
+    hideShortShelves: coerceBoolean(candidate.hideShortShelves, DEFAULT_SETTINGS.hideShortShelves),
+    hideAutoplay: coerceBoolean(candidate.hideAutoplay, DEFAULT_SETTINGS.hideAutoplay),
   };
 }
 
@@ -109,7 +124,9 @@ export function coerceSessionHistory(input: unknown): StudySessionHistory | null
   return {
     sessionId: candidate.sessionId,
     startedAt: normalizePositiveNumber(candidate.startedAt, Date.now()),
-    endedAt: candidate.endedAt === null ? null : normalizePositiveNumber(candidate.endedAt, Date.now()),
+    endedAt: candidate.endedAt === null || candidate.endedAt === undefined
+      ? null
+      : normalizePositiveNumber(candidate.endedAt, Date.now()),
     videos,
   };
 }
@@ -122,9 +139,13 @@ function coerceNoteItem(input: unknown): NoteItem | null {
   if (!candidate.id || typeof candidate.text !== 'string') {
     return null;
   }
+  const text = candidate.text.trim();
+  if (!text) {
+    return null;
+  }
   return {
     id: candidate.id,
-    text: candidate.text.trim(),
+    text,
     timestampSec: normalizePositiveNumber(candidate.timestampSec, 0),
     createdAt: normalizePositiveNumber(candidate.createdAt, Date.now()),
   };
@@ -158,13 +179,28 @@ function normalizePresetList(input: unknown): number[] {
     return [...DEFAULT_SETTINGS.presets];
   }
   const values = input
-    .map((value) => normalizePositiveNumber(value, 0))
+    .map((value) => clampMinutes(normalizePositiveNumber(value, 0)))
     .filter((value) => value > 0);
-  return values.length > 0 ? Array.from(new Set(values)) : [...DEFAULT_SETTINGS.presets];
+  return values.length > 0 ? Array.from(new Set(values)).sort((a, b) => a - b) : [...DEFAULT_SETTINGS.presets];
 }
 
 function normalizePositiveNumber(input: unknown, fallback: number): number {
   return typeof input === 'number' && Number.isFinite(input) && input >= 0 ? Math.round(input) : fallback;
+}
+
+function clampMinutes(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_SETTINGS.defaultSessionMinutes;
+  }
+  return Math.min(MAX_CUSTOM_MINUTES, Math.max(MIN_CUSTOM_MINUTES, Math.round(value)));
+}
+
+function coerceBoolean(input: unknown, fallback: boolean): boolean {
+  return typeof input === 'boolean' ? input : fallback;
+}
+
+function coerceThemePreference(input: unknown): ThemePreference {
+  return input === 'light' || input === 'dark' || input === 'system' ? input : DEFAULT_SETTINGS.themePreference;
 }
 
 export async function getSettings(driver: StorageDriver = chromeStorageDriver): Promise<StudySettings> {

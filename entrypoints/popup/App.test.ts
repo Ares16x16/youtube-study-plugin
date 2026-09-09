@@ -16,6 +16,12 @@ describe('buildPopupStatus', () => {
     label: 'Home feed',
   };
 
+  const resultsRoute: RouteInfo = {
+    kind: 'results',
+    allowedDuringSession: true,
+    label: 'Search results',
+  };
+
   it('explains why watch pages stay open during active sessions', () => {
     expect(buildPopupStatus(watchRoute, 'active')).toEqual({
       title: 'Study happens on this watch page.',
@@ -41,5 +47,10 @@ describe('buildPopupStatus', () => {
         'YouTube is unlocked until you resume the session. Resume when you want blocking and the study panel back.',
       showWatchGuide: true,
     });
+  });
+
+  it('shows expired and results guidance', () => {
+    expect(buildPopupStatus(watchRoute, 'expired').title).toBe('The last study session finished.');
+    expect(buildPopupStatus(resultsRoute, 'active').title).toBe('Search stays available during Study Mode.');
   });
 });

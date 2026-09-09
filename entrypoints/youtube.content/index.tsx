@@ -15,6 +15,7 @@ import type {
   NotesResponse,
   PlayerBootstrapData,
   SessionResponse,
+  SettingsResponse,
   StudySettings,
   TranscriptCue,
   TranscriptResponse,
@@ -42,13 +43,14 @@ interface ContentState {
   note: VideoNote | null;
   transcript: TranscriptState;
   exportFeedback: string | null;
+  actionError: string | null;
 }
 
 function getRuntimeUrl() {
   if (
-    typeof window === 'undefined' ||
-    !window.location ||
-    typeof window.location.href !== 'string'
+    typeof window === 'undefined'
+    || !window.location
+    || typeof window.location.href !== 'string'
   ) {
     return 'https://www.youtube.com/';
   }
@@ -70,6 +72,7 @@ const state: ContentState = {
     trackUrl: null,
   },
   exportFeedback: null,
+  actionError: null,
 };
 
 let overlayHost: HTMLDivElement | null = null;
@@ -79,6 +82,8 @@ let panelRoot: ReactDOM.Root | null = null;
 let lastUrl = getRuntimeUrl();
 let refreshToken = 0;
 let pageScriptReadyPromise: Promise<void> | null = null;
+let historyHooksInstalled = false;
+let busyAction = false;
 
 const PAGE_SCRIPT_ID = 'yt-study-mode-page-script';
 type PanelMountMode = 'sidebar' | 'floating';
@@ -181,9 +186,15 @@ function disposePanelRoot() {
 
 function updateDocumentAttributes() {
   const phase = getSessionPhase(state.session, state.now);
+  const settings = state.settings;
   document.documentElement.dataset.studyModeSession = phase;
   document.documentElement.dataset.studyModeRoute = state.route.kind;
   document.documentElement.dataset.studyModeTheme = state.resolvedTheme;
+  document.documentElement.dataset.studyHideComments = String(settings.hideComments);
+  document.documentElement.dataset.studyHideLiveChat = String(settings.hideLiveChat);
+  document.documentElement.dataset.studyHideRecommendations = String(settings.hideRecommendations);
+  document.documentElement.dataset.studyHideShortShelves = String(settings.hideShortShelves);
+  document.documentElement.dataset.studyHideAutoplay = String(settings.hideAutoplay);
 }
 
 function shouldShowOverlay() {
@@ -231,9 +242,11 @@ function renderOverlay() {
       theme={state.resolvedTheme}
       routeLabel={state.route.label}
       countdown={formatCountdown(getRemainingMs(state.session, state.now))}
-      onExtend={() => void extendSession()}
-      onEnd={() => void endSession()}
-      onBreak={() => void pauseSession()}
+      busy={busyAction}
+      actionError={state.actionError}
+      onExtend={() => void runOverlayAction('extend', extendSession)}
+      onEnd={() => void runOverlayAction('end', endSession)}
+      onBreak={() => void runOverlayAction('break', pauseSession)}
       onOpenSearch={() => {
         window.location.assign('https://www.youtube.com/results?search_query=');
       }}
@@ -267,8 +280,27 @@ function renderPanel() {
       onRetryTranscript={() => void loadTranscript(primaryTrack?.trackUrl ?? null)}
       onSeekCue={(startSec) => seekTo(startSec)}
       exportFeedback={state.exportFeedback}
+      now={state.now}
     />,
   );
+}
+
+async function runOverlayAction(name: string, action: () => Promise<void>) {
+  if (busyAction) {
+    return;
+  }
+  busyAction = true;
+  setState({ actionError: null });
+  try {
+    await action();
+  } catch (error) {
+    setState({
+      actionError: error instanceof Error ? error.message : `Failed to ${name} session.`,
+    });
+  } finally {
+    busyAction = false;
+    renderAll();
+  }
 }
 
 function readCurrentVideoTime() {
@@ -303,10 +335,11 @@ async function addNote(text: string): Promise<boolean> {
   });
 
   if (!response.ok) {
+    setState({ exportFeedback: response.error });
     return false;
   }
 
-  setState({ note: response.note });
+  setState({ note: response.note, exportFeedback: null });
   return true;
 }
 
@@ -393,23 +426,26 @@ async function extendSession() {
     type: 'session:extend',
     durationMinutes: DEFAULT_EXTEND_MINUTES,
   });
-  if (response.ok) {
-    setState({ session: response.session, now: Date.now() });
+  if (!response.ok) {
+    throw new Error(response.error);
   }
+  setState({ session: response.session, now: Date.now(), actionError: null });
 }
 
 async function pauseSession() {
   const response = await sendRuntimeMessage<SessionResponse | ErrorResponse>({ type: 'session:pause' });
-  if (response.ok) {
-    setState({ session: response.session, now: Date.now() });
+  if (!response.ok) {
+    throw new Error(response.error);
   }
+  setState({ session: response.session, now: Date.now(), actionError: null });
 }
 
 async function endSession() {
   const response = await sendRuntimeMessage<SessionResponse | ErrorResponse>({ type: 'session:end', reason: 'manual' });
-  if (response.ok) {
-    setState({ session: response.session, now: Date.now() });
+  if (!response.ok) {
+    throw new Error(response.error);
   }
+  setState({ session: response.session, now: Date.now(), actionError: null });
 }
 
 function canonicalVideoUrl(videoId: string) {
@@ -465,8 +501,19 @@ function applyPanelHostLayout(mode: PanelMountMode) {
   panelHost.style.zIndex = mode === 'floating' ? '2147483646' : '';
 }
 
-async function refreshPageState(options: { syncSession?: boolean } = {}) {
+async function refreshPageState(options: { syncSession?: boolean; syncSettings?: boolean } = {}) {
   const token = ++refreshToken;
+
+  if (options.syncSettings) {
+    const settingsResponse = await sendRuntimeMessage<SettingsResponse | ErrorResponse>({ type: 'settings:get' });
+    if (token !== refreshToken) {
+      return;
+    }
+    if (settingsResponse.ok) {
+      state.settings = settingsResponse.settings;
+      state.resolvedTheme = resolveThemePreference(settingsResponse.settings.themePreference, getSystemPrefersDark());
+    }
+  }
 
   if (options.syncSession) {
     const sessionResponse = await sendRuntimeMessage<SessionResponse | ErrorResponse>({ type: 'session:get' });
@@ -544,6 +591,7 @@ function onStorageChanged(changes: { [key: string]: chrome.storage.StorageChange
     setState({
       settings,
       resolvedTheme: resolveThemePreference(settings.themePreference, getSystemPrefersDark()),
+      route: getRouteInfo(window.location.href, settings),
     });
     void refreshPageState();
   }
@@ -556,8 +604,36 @@ function maybeHandleUrlChange() {
   lastUrl = window.location.href;
   state.route = getRouteInfo(window.location.href, state.settings);
   state.now = Date.now();
+  state.transcript = {
+    status: 'idle',
+    cues: [],
+    error: null,
+    trackUrl: null,
+  };
   renderAll();
   void refreshPageState({ syncSession: true });
+}
+
+function installHistoryHooks() {
+  if (historyHooksInstalled) {
+    return;
+  }
+  historyHooksInstalled = true;
+
+  const originalPushState = history.pushState.bind(history);
+  const originalReplaceState = history.replaceState.bind(history);
+
+  history.pushState = function pushState(...args) {
+    const result = originalPushState(...args);
+    queueMicrotask(maybeHandleUrlChange);
+    return result;
+  };
+
+  history.replaceState = function replaceState(...args) {
+    const result = originalReplaceState(...args);
+    queueMicrotask(maybeHandleUrlChange);
+    return result;
+  };
 }
 
 function OverlayShell(props: {
@@ -565,6 +641,8 @@ function OverlayShell(props: {
   theme: ResolvedTheme;
   routeLabel: string;
   countdown: string;
+  busy: boolean;
+  actionError: string | null;
   onExtend: () => void;
   onEnd: () => void;
   onBreak: () => void;
@@ -575,40 +653,41 @@ function OverlayShell(props: {
     props.phase === 'expired' ? 'Study session finished.' : `${props.routeLabel} is locked during the session.`;
   const body =
     props.phase === 'expired'
-      ? 'Extend the session to keep studying, or end it and go back to normal YouTube.'
-      : 'Only search results and direct watch pages stay available while Study Mode is active.';
+      ? `Extend by ${DEFAULT_EXTEND_MINUTES} minutes to keep studying with blocking enabled, or end the session to browse YouTube normally.`
+      : 'Only search results and direct watch pages stay available while Study Mode is active. Take a Break to pause the timer and unlock YouTube temporarily.';
 
   return (
-    <div style={styles.backdrop}>
+    <div style={styles.backdrop} role="dialog" aria-modal="true" aria-label="YouTube Study Mode lock screen">
       <div style={styles.card}>
         <p style={styles.eyebrow}>YouTube Study Mode</p>
         <h2 style={styles.title}>{heading}</h2>
         <p style={styles.body}>{body}</p>
         {props.phase === 'active' ? <div style={styles.timer}>{props.countdown} remaining</div> : null}
         <div style={styles.actions}>
-          <button style={styles.primaryButton} onClick={props.onExtend}>
+          <button style={styles.primaryButton} disabled={props.busy} onClick={props.onExtend}>
             Extend {DEFAULT_EXTEND_MINUTES} min
           </button>
           {props.phase === 'active' ? (
-            <button style={styles.secondaryButton} onClick={props.onOpenSearch}>
+            <button style={styles.secondaryButton} disabled={props.busy} onClick={props.onOpenSearch}>
               Open search
             </button>
           ) : (
-            <button style={styles.secondaryButton} onClick={props.onEnd}>
+            <button style={styles.secondaryButton} disabled={props.busy} onClick={props.onEnd}>
               End session
             </button>
           )}
         </div>
         {props.phase === 'active' ? (
           <div style={styles.actions}>
-            <button style={styles.ghostButton} onClick={props.onEnd}>
-              End session
-            </button>
-            <button style={styles.ghostButton} onClick={props.onBreak}>
+            <button style={styles.ghostButton} disabled={props.busy} onClick={props.onBreak}>
               Break
+            </button>
+            <button style={styles.ghostButton} disabled={props.busy} onClick={props.onEnd}>
+              End session
             </button>
           </div>
         ) : null}
+        {props.actionError ? <p style={styles.error}>{props.actionError}</p> : null}
       </div>
     </div>
   );
@@ -626,20 +705,26 @@ function StudyPanel(props: {
   onRetryTranscript: () => void;
   onSeekCue: (startSec: number) => void;
   exportFeedback: string | null;
+  now: number;
 }) {
   const [draft, setDraft] = useState('');
   const [activeTab, setActiveTab] = useState<'notes' | 'transcript'>('notes');
   const [isSaving, setIsSaving] = useState(false);
+  const [videoTime, setVideoTime] = useState(() => readCurrentVideoTime());
   const styles = createPanelStyles(props.theme);
+  const noteCount = props.note?.items.length ?? 0;
 
   useEffect(() => {
-    if (props.note?.items.length === 0) {
-      setDraft('');
-    }
-  }, [props.note?.items.length]);
+    const timer = window.setInterval(() => setVideoTime(readCurrentVideoTime()), 500);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    setDraft('');
+  }, [props.playerData?.videoId]);
 
   async function handleAddNote() {
-    if (!draft.trim()) {
+    if (!draft.trim() || isSaving) {
       return;
     }
     setIsSaving(true);
@@ -656,6 +741,11 @@ function StudyPanel(props: {
       stopImmediatePropagation?: () => void;
     };
     nativeEvent.stopImmediatePropagation?.();
+
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      void handleAddNote();
+    }
   }
 
   return (
@@ -665,14 +755,14 @@ function StudyPanel(props: {
           <p style={styles.eyebrow}>Study panel</p>
           <h2 style={styles.title}>{props.playerData?.title ?? props.fallbackTitle}</h2>
         </div>
-        <button style={styles.exportButton} onClick={props.onExport}>
+        <button style={styles.exportButton} onClick={props.onExport} disabled={noteCount === 0}>
           Export
         </button>
       </div>
 
       <div style={styles.tabs}>
         <button style={activeTab === 'notes' ? styles.activeTab : styles.tab} onClick={() => setActiveTab('notes')}>
-          Notes
+          Notes{noteCount > 0 ? ` (${noteCount})` : ''}
         </button>
         <button
           style={activeTab === 'transcript' ? styles.activeTab : styles.tab}
@@ -686,21 +776,21 @@ function StudyPanel(props: {
         <div style={styles.section}>
           <textarea
             style={styles.textarea}
-            placeholder="Capture the key idea from this moment in the video."
+            placeholder="Capture the key idea from this moment in the video. Ctrl/Cmd+Enter to save."
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={suppressYoutubeShortcuts}
             onKeyUp={suppressYoutubeShortcuts}
           />
-          <button style={styles.primaryButton} disabled={isSaving} onClick={() => void handleAddNote()}>
-            Add note at {formatTimestampLabel(readCurrentVideoTime())}
+          <button style={styles.primaryButton} disabled={isSaving || !draft.trim()} onClick={() => void handleAddNote()}>
+            Add note at {formatTimestampLabel(videoTime)}
           </button>
           {props.exportFeedback ? <p style={styles.feedback}>{props.exportFeedback}</p> : null}
           <div style={styles.list}>
-            {(props.note?.items ?? []).length === 0 ? (
+            {noteCount === 0 ? (
               <p style={styles.emptyState}>No notes yet. Capture key moments as you watch.</p>
             ) : (
-              props.note?.items.map((item) => (
+              [...(props.note?.items ?? [])].reverse().map((item) => (
                 <button key={item.id} style={styles.noteItem} onClick={() => props.onSeekCue(item.timestampSec)}>
                   <span style={styles.noteTime}>{formatTimestampLabel(item.timestampSec)}</span>
                   <span>{item.text}</span>
@@ -723,7 +813,7 @@ function StudyPanel(props: {
               </button>
             </div>
           ) : null}
-          {props.transcript.status === 'empty' ? <p style={styles.emptyState}>Transcript unavailable for this video.</p> : null}
+          {props.transcript.status === 'empty' ? <p style={styles.emptyState}>Transcript unavailable for this video. Notes still work.</p> : null}
           {props.transcript.status === 'ready' ? (
             <div style={styles.list}>
               {props.transcript.cues.map((cue) => (
@@ -826,6 +916,11 @@ function createOverlayStyles(theme: ResolvedTheme): Record<string, CSSProperties
       color: palette.secondaryText,
       fontWeight: 600,
       cursor: 'pointer',
+    },
+    error: {
+      margin: '14px 0 0',
+      color: palette.dangerText,
+      lineHeight: 1.5,
     },
   };
 }
@@ -990,6 +1085,7 @@ export default defineContentScript({
       });
     };
 
+    installHistoryHooks();
     chrome.storage.onChanged.addListener(onStorageChanged);
     systemThemeMedia.addEventListener('change', handleSystemThemeChange);
     document.addEventListener('yt-navigate-finish', maybeHandleUrlChange as EventListener);
@@ -999,6 +1095,9 @@ export default defineContentScript({
     const observer = new MutationObserver(() => {
       if (shouldShowPanel()) {
         ensurePanelRoot();
+        if (panelRoot) {
+          renderPanel();
+        }
       }
     });
     observer.observe(document.documentElement, {
@@ -1009,9 +1108,13 @@ export default defineContentScript({
     window.setInterval(() => {
       maybeHandleUrlChange();
       state.now = Date.now();
+      if (getSessionPhase(state.session, state.now) === 'expired' && state.session?.status === 'active') {
+        void refreshPageState({ syncSession: true });
+        return;
+      }
       renderAll();
     }, 1_000);
 
-    void refreshPageState({ syncSession: true });
+    void refreshPageState({ syncSession: true, syncSettings: true });
   },
 });

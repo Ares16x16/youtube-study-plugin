@@ -18,8 +18,18 @@ describe('buildNotesMarkdown', () => {
         },
       ],
     });
-
     expect(markdown).toContain('# Linear algebra review');
     expect(markdown).toContain('[1:35](https://www.youtube.com/watch?v=abc123&t=95s) Important theorem');
+  });
+
+  it('renders an empty-state line when there are no notes', () => {
+    const markdown = buildNotesMarkdown({
+      videoId: 'abc123',
+      title: 'Empty',
+      url: 'https://www.youtube.com/watch?v=abc123',
+      updatedAt: 1,
+      items: [],
+    });
+    expect(markdown).toContain('_No notes captured yet._');
   });
 });

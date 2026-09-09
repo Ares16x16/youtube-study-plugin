@@ -17,15 +17,17 @@ export interface RouteInfo {
   label: string;
 }
 
+export type RouteBlockSettings = Pick<
+  StudySettings,
+  'blockChannels' | 'blockHome' | 'blockPlaylists' | 'blockShorts' | 'blockSubscriptions'
+>;
+
 export function getRouteInfo(
   urlLike: string | URL,
-  settings?: Pick<
-    StudySettings,
-    'blockChannels' | 'blockHome' | 'blockPlaylists' | 'blockShorts' | 'blockSubscriptions'
-  >,
+  settings?: RouteBlockSettings,
 ): RouteInfo {
   const url = typeof urlLike === 'string' ? new URL(urlLike) : urlLike;
-  const path = url.pathname;
+  const path = url.pathname.replace(/\/+$/, '') || '/';
 
   if (path === '/watch') {
     return { kind: 'watch', allowedDuringSession: true, label: 'Watch page' };
@@ -33,11 +35,17 @@ export function getRouteInfo(
   if (path === '/results') {
     return { kind: 'results', allowedDuringSession: true, label: 'Search results' };
   }
-  if (path === '/' || path === '/feed/explore') {
+  if (
+    path === '/'
+    || path === '/feed/explore'
+    || path === '/feed/trending'
+    || path === '/gaming'
+    || path === '/feed/storefront'
+  ) {
     return {
       kind: 'home',
       allowedDuringSession: !(settings?.blockHome ?? true),
-      label: 'Home feed',
+      label: path === '/feed/trending' ? 'Trending' : path === '/gaming' ? 'Gaming' : 'Home feed',
     };
   }
   if (path.startsWith('/shorts')) {
@@ -54,25 +62,25 @@ export function getRouteInfo(
       label: 'Subscriptions',
     };
   }
-  if (path === '/playlist') {
+  if (path === '/playlist' || path.startsWith('/playlist')) {
     return {
       kind: 'playlist',
       allowedDuringSession: !(settings?.blockPlaylists ?? true),
       label: 'Playlist',
     };
   }
-  if (path === '/feed/history') {
+  if (path === '/feed/history' || path === '/feed/library') {
     return {
       kind: 'history',
       allowedDuringSession: false,
-      label: 'History',
+      label: path === '/feed/library' ? 'Library' : 'History',
     };
   }
   if (
-    path.startsWith('/@') ||
-    path.startsWith('/channel/') ||
-    path.startsWith('/c/') ||
-    path.startsWith('/user/')
+    path.startsWith('/@')
+    || path.startsWith('/channel/')
+    || path.startsWith('/c/')
+    || path.startsWith('/user/')
   ) {
     return {
       kind: 'channel',
@@ -85,5 +93,13 @@ export function getRouteInfo(
 
 export function getVideoId(urlLike: string | URL): string | null {
   const url = typeof urlLike === 'string' ? new URL(urlLike) : urlLike;
-  return url.searchParams.get('v');
+  if (url.pathname === '/watch') {
+    return url.searchParams.get('v');
+  }
+  const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
+  return shortsMatch?.[1] ?? null;
+}
+
+export function isYouTubeHost(hostname: string): boolean {
+  return hostname === 'www.youtube.com' || hostname === 'youtube.com' || hostname === 'm.youtube.com';
 }

@@ -15,7 +15,14 @@ import {
   updateSettings,
   type StorageDriver,
 } from '../../src/shared/storage';
-import { createEndsAt, getRemainingMinutes, getSessionPhase, pauseActiveSession, resumePausedSession } from '../../src/shared/time';
+import {
+  clampDurationMinutes,
+  createEndsAt,
+  getRemainingMinutes,
+  getSessionPhase,
+  pauseActiveSession,
+  resumePausedSession,
+} from '../../src/shared/time';
 import type {
   ActiveSession,
   ErrorResponse,
@@ -95,20 +102,16 @@ export async function reconcileSessionState(storage?: StorageDriver): Promise<Ac
     return expiredSession;
   }
 
+  if (session.status === 'active') {
+    await scheduleSessionAlarm();
+  }
+
   await syncBadge(session);
   return session;
 }
 
-function sanitizeDuration(durationMinutes: number): number {
-  const rounded = Math.round(durationMinutes);
-  if (!Number.isFinite(rounded) || rounded <= 0) {
-    throw new Error('Duration must be a positive number of minutes.');
-  }
-  return rounded;
-}
-
 async function handleSessionStart(durationMinutes: number, storage?: StorageDriver) {
-  const safeDuration = sanitizeDuration(durationMinutes);
+  const safeDuration = clampDurationMinutes(durationMinutes);
   const startedAt = Date.now();
   const next: ActiveSession = {
     id: createSessionId(),
@@ -139,7 +142,7 @@ async function handleSessionEnd(storage?: StorageDriver) {
 }
 
 async function handleSessionPause(storage?: StorageDriver) {
-  const current = await getSession(storage);
+  const current = await reconcileSessionState(storage);
   if (!current || current.status !== 'active') {
     return { ok: true, session: current } as const;
   }
@@ -155,6 +158,19 @@ async function handleSessionResume(storage?: StorageDriver) {
   if (!current || current.status !== 'paused') {
     return { ok: true, session: current } as const;
   }
+  if ((current.remainingMs ?? 0) <= 0) {
+    const expiredSession: ActiveSession = {
+      ...current,
+      status: 'expired',
+      remainingMs: undefined,
+      endsAt: Date.now(),
+    };
+    await setSession(expiredSession, storage);
+    await finalizeSessionHistory(current.id, storage);
+    await cancelSessionAlarm();
+    await syncBadge(expiredSession);
+    return { ok: true, session: expiredSession } as const;
+  }
   const next = resumePausedSession(current);
   await setSession(next, storage);
   await scheduleSessionAlarm();
@@ -167,7 +183,9 @@ async function handleSessionExtend(durationMinutes: number, storage?: StorageDri
   if (!current) {
     return { ok: true, session: null } as const;
   }
-  const safeDuration = sanitizeDuration(durationMinutes || DEFAULT_EXTEND_MINUTES);
+  const safeDuration = clampDurationMinutes(durationMinutes || DEFAULT_EXTEND_MINUTES);
+  const wasExpired = current.status === 'expired';
+
   if (current.status === 'paused') {
     const remainingMs = Math.max(0, current.remainingMs ?? 0) + safeDuration * 60_000;
     const next: ActiveSession = {
@@ -181,7 +199,8 @@ async function handleSessionExtend(durationMinutes: number, storage?: StorageDri
     await syncBadge(next);
     return { ok: true, session: next } as const;
   }
-  const base = current.status === 'expired' ? Date.now() : Math.max(Date.now(), current.endsAt);
+
+  const base = wasExpired ? Date.now() : Math.max(Date.now(), current.endsAt);
   const next: ActiveSession = {
     ...current,
     status: 'active',
@@ -190,24 +209,35 @@ async function handleSessionExtend(durationMinutes: number, storage?: StorageDri
     remainingMs: undefined,
   };
   await setSession(next, storage);
+  if (wasExpired) {
+    await reopenSessionHistory(current.id, storage);
+  }
   await scheduleSessionAlarm();
   await syncBadge(next);
   return { ok: true, session: next } as const;
 }
 
 async function handleNotesAdd(message: Extract<RuntimeMessage, { type: 'notes:add' }>, storage?: StorageDriver) {
+  const text = message.text.trim();
+  if (!text) {
+    return { ok: false, error: 'Note text cannot be empty.' } as const;
+  }
+  if (!message.videoId.trim()) {
+    return { ok: false, error: 'A video id is required to save notes.' } as const;
+  }
+
   const current = await getVideoNote(message.videoId, storage);
   const next: VideoNote = {
     videoId: message.videoId,
-    title: message.title,
-    url: message.url,
+    title: message.title.trim() || current?.title || 'YouTube video',
+    url: message.url.trim() || current?.url || `https://www.youtube.com/watch?v=${message.videoId}`,
     updatedAt: Date.now(),
     items: [
       ...(current?.items ?? []),
       {
         id: crypto.randomUUID(),
         timestampSec: Math.max(0, Math.floor(message.timestampSec)),
-        text: message.text.trim(),
+        text,
         createdAt: Date.now(),
       },
     ],
@@ -221,9 +251,9 @@ async function handleSessionHistoryTrack(
   message: Extract<RuntimeMessage, { type: 'session:history:track' }>,
   storage?: StorageDriver,
 ) {
-  const session = await getSession(storage);
-  if (!session) {
-    return { ok: true, history: null } as const;
+  const session = await reconcileSessionState(storage);
+  if (!session || session.status === 'expired') {
+    return { ok: true, history: await getSessionHistory(storage) } as const;
   }
 
   const history = await ensureSessionHistory(session, storage);
@@ -262,12 +292,23 @@ async function handleNotesExport(videoId: string, storage?: StorageDriver): Prom
   }
   return {
     ok: true,
-    filename: `${slugify(note.title)}-${note.videoId}.md`,
+    filename: `${slugify(note.title) || 'notes'}-${note.videoId}.md`,
     markdown: buildNotesMarkdown(note),
   };
 }
 
 async function handleTranscriptGet(trackUrl: string, fetchFn: typeof fetch): Promise<TranscriptResponse | ErrorResponse> {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(trackUrl);
+  } catch {
+    return { ok: false, error: 'Invalid transcript URL.' };
+  }
+
+  if (parsedUrl.protocol !== 'https:' || !parsedUrl.hostname.endsWith('youtube.com')) {
+    return { ok: false, error: 'Transcript URL must be a YouTube HTTPS endpoint.' };
+  }
+
   const response = await fetchFn(trackUrl, {
     credentials: 'include',
     headers: {
@@ -377,9 +418,26 @@ async function finalizeSessionHistory(sessionId: string, storage?: StorageDriver
   );
 }
 
+async function reopenSessionHistory(sessionId: string, storage?: StorageDriver) {
+  const existing = await getSessionHistory(storage);
+  if (!existing || existing.sessionId !== sessionId) {
+    return;
+  }
+  if (existing.endedAt === null) {
+    return;
+  }
+  await setSessionHistory(
+    {
+      ...existing,
+      endedAt: null,
+    },
+    storage,
+  );
+}
+
 async function syncHistoryNotes(note: VideoNote, storage?: StorageDriver) {
   const activeSession = await getSession(storage);
-  if (!activeSession) {
+  if (!activeSession || activeSession.status === 'expired') {
     return;
   }
 
