@@ -5,6 +5,7 @@ export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'YouTube Study Mode',
+    version: '1.0.0',
     description:
       'Turn YouTube into a timed study environment with strict distraction blocking, transcripts, and timestamped notes.',
     permissions: ['storage', 'alarms'],

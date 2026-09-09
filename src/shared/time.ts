@@ -1,3 +1,4 @@
+import { MAX_CUSTOM_MINUTES, MIN_CUSTOM_MINUTES } from './constants';
 import type { ActiveSession } from './types';
 
 export function getSessionPhase(
@@ -32,8 +33,12 @@ export function getRemainingMinutes(session: ActiveSession | null, now = Date.no
 
 export function formatCountdown(ms: number): string {
   const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
@@ -50,6 +55,14 @@ export function formatTimestampLabel(seconds: number): string {
 
 export function createEndsAt(durationMinutes: number, now = Date.now()): number {
   return now + Math.round(durationMinutes) * 60_000;
+}
+
+export function clampDurationMinutes(durationMinutes: number): number {
+  const rounded = Math.round(durationMinutes);
+  if (!Number.isFinite(rounded) || rounded <= 0) {
+    throw new Error('Duration must be a positive number of minutes.');
+  }
+  return Math.min(MAX_CUSTOM_MINUTES, Math.max(MIN_CUSTOM_MINUTES, rounded));
 }
 
 export function pauseActiveSession(session: ActiveSession, now = Date.now()): ActiveSession {

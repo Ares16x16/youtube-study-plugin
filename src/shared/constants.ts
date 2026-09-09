@@ -1,6 +1,7 @@
 import type { StudySettings } from './types';
 
 export const EXTENSION_NAME = 'YouTube Study Mode';
+export const EXTENSION_VERSION = '1.0.0';
 export const DEFAULT_SESSION_MINUTES = 25;
 export const SESSION_PRESETS = [25, 45, 60] as const;
 export const SYNC_SETTINGS_KEY = 'studySettings';

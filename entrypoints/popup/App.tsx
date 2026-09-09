@@ -1,9 +1,14 @@
 import { startTransition, useEffect, useState } from 'react';
 
-import { DEFAULT_EXTEND_MINUTES, MAX_CUSTOM_MINUTES, MIN_CUSTOM_MINUTES } from '../../src/shared/constants';
+import {
+  DEFAULT_EXTEND_MINUTES,
+  EXTENSION_VERSION,
+  MAX_CUSTOM_MINUTES,
+  MIN_CUSTOM_MINUTES,
+} from '../../src/shared/constants';
 import { queryTabs, sendRuntimeMessage } from '../../src/shared/chrome';
 import { downloadTextFile } from '../../src/shared/download';
-import { getRouteInfo, getVideoId, type RouteInfo } from '../../src/shared/routes';
+import { getRouteInfo, getVideoId, isYouTubeHost, type RouteInfo } from '../../src/shared/routes';
 import { getSystemPrefersDark, resolveThemePreference, validateCustomMinutesInput } from '../../src/shared/theme';
 import { formatCountdown, formatTimestampLabel, getRemainingMs, getSessionPhase } from '../../src/shared/time';
 import type {
@@ -38,6 +43,22 @@ const DEFAULT_STATUS: PopupStatus = {
   showWatchGuide: false,
 };
 
+const BLOCK_SETTING_FIELDS: Array<{ key: keyof StudySettings; label: string }> = [
+  { key: 'blockHome', label: 'Block Home / Trending' },
+  { key: 'blockShorts', label: 'Block Shorts' },
+  { key: 'blockSubscriptions', label: 'Block Subscriptions' },
+  { key: 'blockChannels', label: 'Block Channels' },
+  { key: 'blockPlaylists', label: 'Block Playlists' },
+];
+
+const HIDE_SETTING_FIELDS: Array<{ key: keyof StudySettings; label: string }> = [
+  { key: 'hideComments', label: 'Hide comments' },
+  { key: 'hideLiveChat', label: 'Hide live chat' },
+  { key: 'hideRecommendations', label: 'Hide recommendations' },
+  { key: 'hideShortShelves', label: 'Hide Shorts shelves' },
+  { key: 'hideAutoplay', label: 'Hide autoplay / next' },
+];
+
 export function App() {
   const [session, setSession] = useState<SessionResponse['session']>(null);
   const [settings, setSettings] = useState<StudySettings | null>(null);
@@ -51,6 +72,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [systemPrefersDark, setSystemPrefersDark] = useState(() => getSystemPrefersDark());
   const [expandedHistoryVideoId, setExpandedHistoryVideoId] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     void refresh();
@@ -64,7 +86,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (getSessionPhase(session) !== 'active') {
+    const phase = getSessionPhase(session);
+    if (phase !== 'active' && phase !== 'paused') {
       return undefined;
     }
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -110,8 +133,17 @@ export function App() {
       return;
     }
 
-    const url = new URL(tab.url);
-    if (url.hostname !== 'www.youtube.com') {
+    let url: URL;
+    try {
+      url = new URL(tab.url);
+    } catch {
+      setActiveVideo(null);
+      setCurrentRoute(null);
+      setStatus(DEFAULT_STATUS);
+      return;
+    }
+
+    if (!isYouTubeHost(url.hostname)) {
       setActiveVideo(null);
       setCurrentRoute(null);
       setStatus({
@@ -236,6 +268,12 @@ export function App() {
       });
       if (response.ok) {
         setSettings(response.settings);
+        if (currentRoute) {
+          setCurrentRoute(getRouteInfo(
+            activeVideo?.url ?? `https://www.youtube.com${currentRoute.kind === 'watch' ? '/watch' : '/'}`,
+            response.settings,
+          ));
+        }
       } else {
         setError(response.error);
       }
@@ -263,9 +301,10 @@ export function App() {
       <section className="hero">
         <div>
           <p className="brand-title">YouTube Study Mode</p>
+          <p className="version-chip">v{EXTENSION_VERSION}</p>
         </div>
         <div className={`session-pill session-pill--${phase}`}>
-          {phase === 'active' ? countdown : phase === 'expired' ? 'Expired' : phase === 'paused' ? 'Paused' : 'Idle'}
+          {phase === 'active' || phase === 'paused' ? countdown : phase === 'expired' ? 'Expired' : 'Idle'}
         </div>
       </section>
 
@@ -306,24 +345,50 @@ export function App() {
             </button>
           </div>
         </section>
-      ) : phase === 'paused' ? (
+      ) : null}
+
+      {phase === 'paused' ? (
         <section className="panel">
           <p className="panel-label">Paused session</p>
-          <p className="status-text">The timer is paused and YouTube is unlocked. Resume when you want Study Mode to start blocking again.</p>
-          <div className="button-grid">
+          <p className="status-text">
+            Timer paused with {countdown} left. YouTube is unlocked until you resume.
+          </p>
+          <div className="button-grid button-grid--triple">
             <button className="primary-button" disabled={busyAction !== null} onClick={() => void resumeSession()}>
               Resume
+            </button>
+            <button className="ghost-button" disabled={busyAction !== null} onClick={() => void extendSession()}>
+              +{DEFAULT_EXTEND_MINUTES} min
             </button>
             <button className="ghost-button" disabled={busyAction !== null} onClick={() => void endSession()}>
               End
             </button>
           </div>
         </section>
-      ) : (
+      ) : null}
+
+      {phase === 'expired' ? (
         <section className="panel">
-          <p className="panel-label">Start a session</p>
+          <p className="panel-label">Session ended</p>
+          <p className="status-text">
+            Extend to continue studying with the same session history, or clear and start fresh.
+          </p>
+          <div className="button-grid">
+            <button className="primary-button" disabled={busyAction !== null} onClick={() => void extendSession()}>
+              Extend {DEFAULT_EXTEND_MINUTES} min
+            </button>
+            <button className="ghost-button" disabled={busyAction !== null} onClick={() => void endSession()}>
+              Clear session
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {phase === 'idle' || phase === 'expired' ? (
+        <section className="panel">
+          <p className="panel-label">{phase === 'expired' ? 'Or start a new session' : 'Start a session'}</p>
           <div className="preset-grid">
-            {settings?.presets.map((preset) => (
+            {(settings?.presets ?? [25, 45, 60]).map((preset) => (
               <button
                 key={preset}
                 className="preset-button"
@@ -359,18 +424,8 @@ export function App() {
           <p className={`input-helper${customValidation.error ? ' input-helper--error' : ''}`}>
             {customValidation.error ?? `Use ${MIN_CUSTOM_MINUTES}-${MAX_CUSTOM_MINUTES} whole minutes.`}
           </p>
-          {phase === 'expired' ? (
-            <div className="button-grid">
-              <button className="primary-button" disabled={busyAction !== null} onClick={() => void extendSession()}>
-                Resume
-              </button>
-              <button className="ghost-button" disabled={busyAction !== null} onClick={() => void endSession()}>
-                Clear
-              </button>
-            </div>
-          ) : null}
         </section>
-      )}
+      ) : null}
 
       {status.showWatchGuide && isWatchPage ? (
         <section className="panel">
@@ -445,30 +500,73 @@ export function App() {
       ) : null}
 
       <section className="panel">
-        <p className="panel-label">Popup settings</p>
-        <label className="field">
-          <span>Default duration</span>
-          <input
-            type="number"
-            min={MIN_CUSTOM_MINUTES}
-            max={MAX_CUSTOM_MINUTES}
-            value={settings?.defaultSessionMinutes ?? 25}
-            onChange={(event) =>
-              void updateSetting('defaultSessionMinutes', Math.max(MIN_CUSTOM_MINUTES, Number(event.target.value)))
-            }
-          />
-        </label>
-        <label className="field">
-          <span>Theme</span>
-          <select
-            value={settings?.themePreference ?? 'system'}
-            onChange={(event) => void updateSetting('themePreference', event.target.value as ThemePreference)}
-          >
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
+        <div className="panel-row">
+          <p className="panel-label">Settings</p>
+          <button className="ghost-button" onClick={() => setSettingsOpen((open) => !open)}>
+            {settingsOpen ? 'Hide' : 'Show'}
+          </button>
+        </div>
+        {settingsOpen ? (
+          <>
+            <label className="field">
+              <span>Default duration</span>
+              <input
+                type="number"
+                min={MIN_CUSTOM_MINUTES}
+                max={MAX_CUSTOM_MINUTES}
+                value={settings?.defaultSessionMinutes ?? 25}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  if (Number.isFinite(next)) {
+                    void updateSetting(
+                      'defaultSessionMinutes',
+                      Math.min(MAX_CUSTOM_MINUTES, Math.max(MIN_CUSTOM_MINUTES, next)),
+                    );
+                  }
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Theme</span>
+              <select
+                value={settings?.themePreference ?? 'system'}
+                onChange={(event) => void updateSetting('themePreference', event.target.value as ThemePreference)}
+              >
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+            <div className="toggle-group">
+              <p className="panel-label">Route blocking</p>
+              {BLOCK_SETTING_FIELDS.map((field) => (
+                <label key={field.key} className="toggle-row">
+                  <span>{field.label}</span>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.[field.key])}
+                    onChange={(event) => void updateSetting(field.key, event.target.checked as never)}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="toggle-group">
+              <p className="panel-label">Watch-page cleanup</p>
+              {HIDE_SETTING_FIELDS.map((field) => (
+                <label key={field.key} className="toggle-row">
+                  <span>{field.label}</span>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.[field.key])}
+                    onChange={(event) => void updateSetting(field.key, event.target.checked as never)}
+                  />
+                </label>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="status-text">Theme, default duration, route blocks, and watch-page cleanup.</p>
+        )}
       </section>
 
       <footer className="author-footer">
@@ -503,7 +601,7 @@ export function buildPopupStatus(
   if (phase === 'expired') {
     return {
       title: 'The last study session finished.',
-      description: 'Resume to keep studying with blocking enabled, or clear the session to return to normal browsing.',
+      description: 'Extend to keep studying with blocking enabled, or clear the session to return to normal browsing.',
       showWatchGuide: route.kind === 'watch',
     };
   }
